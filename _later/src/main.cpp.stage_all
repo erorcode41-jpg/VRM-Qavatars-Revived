@@ -1,0 +1,159 @@
+#include "main.hpp"
+
+#include <conditional-dependencies/shared/main.hpp>
+#include "bsml/shared/BSML.hpp"
+#include <filesystem>
+#include <GlobalNamespace/Saber.hpp>
+#include <UnityEngine/Resources.hpp>
+
+#include "custom-types/shared/coroutine.hpp"
+#include "custom-types/shared/register.hpp"
+
+#include "GlobalNamespace/MainMenuViewController.hpp"
+#include "GlobalNamespace/MainCamera.hpp"
+#include "GlobalNamespace/MainEffectContainerSO.hpp"
+#include "GlobalNamespace/MainEffectSO.hpp"
+
+#include "UnityEngine/SceneManagement/SceneManager.hpp"
+#include "UnityEngine/Camera.hpp"
+#include "UnityEngine/QualitySettings.hpp"
+
+#include "AssetLib/shaders/shaderLoader.hpp"
+#include "AssetLib/shaders/ShaderSO.hpp"
+#include "AssetLib/modelImporter.hpp"
+
+#include "UI/AvatarsFlowCoordinator.hpp"
+
+#include "LightManager.hpp"
+#include "SceneEventManager.hpp"
+#include "GroundOffsetManager.hpp"
+#include "MaterialTracker.hpp"
+#include "MirrorManager.hpp"
+
+#include "config/ConfigManager.hpp"
+#include "customTypes/DynamicShadowProjector/Projector.hpp"
+
+#include "VMC/VMCClient.hpp"
+#include "VMC/VMCServer.hpp"
+
+static modloader::ModInfo modInfo{MOD_ID, VERSION, 0};
+
+custom_types::Helpers::Coroutine Setup() {
+    getLogger().info("x1");
+    if(!VRMQavatars::ShaderLoader::shaders)
+    {
+        getLogger().info("x2");
+        //Womp womp
+        if(UnityEngine::Resources::FindObjectsOfTypeAll<VRMQavatars::LightManager*>().size() == 0)
+        {
+            UnityEngine::GameObject::New_ctor("LightManager")->AddComponent<VRMQavatars::LightManager*>();
+        }
+        getLogger().info("x3");
+        co_yield custom_types::Helpers::CoroutineHelper::New(VRMQavatars::ShaderLoader::LoadBund());
+        getLogger().info("x4");
+    }
+    getLogger().info("x5");
+    if(VRMQavatars::AvatarManager::currentContext == nullptr)
+    {
+        getLogger().info("x6");
+        VRMQavatars::AvatarManager::StartupLoad();
+    }
+    getLogger().info("x7");
+
+    VRMQavatars::VMC::VMCClient::InitClient();
+    VRMQavatars::VMC::VMCServer::InitServer();
+    getLogger().info("x8");
+    VRMQavatars::GroundOffsetManager::Init();
+    getLogger().info("x9");
+    VRMQavatars::MirrorManager::CreateMainMirror();
+    getLogger().info("x10");
+    co_return;
+}
+ 
+MAKE_HOOK_MATCH(MainMenuUIHook, &GlobalNamespace::MainMenuViewController::DidActivate, void, GlobalNamespace::MainMenuViewController* self, bool firstActivation, bool addedToHierarchy, bool screenSystemEnabling) {
+    MainMenuUIHook(self, firstActivation, addedToHierarchy, screenSystemEnabling);
+    if(firstActivation)
+    {
+        self->StartCoroutine(custom_types::Helpers::CoroutineHelper::New(Setup()));
+    }
+}
+
+// FP/TP stuff should be in its own mod...
+MAKE_HOOK_MATCH(MainCameraHook, &GlobalNamespace::MainCamera::Awake, void, GlobalNamespace::MainCamera* self)
+{
+    MainCameraHook(self);
+    constexpr int fpmask =
+           2147483647 &
+           ~(1 << 3);
+    self->get_camera()->set_cullingMask(fpmask);
+}
+
+//I know
+//I know
+//I know
+//Scene manager is bad
+//Open a PR (please)
+MAKE_HOOK_MATCH(SceneManager_Internal_ActiveSceneChanged, &UnityEngine::SceneManagement::SceneManager::Internal_ActiveSceneChanged, void, UnityEngine::SceneManagement::Scene prevScene, UnityEngine::SceneManagement::Scene nextScene) {
+    SceneManager_Internal_ActiveSceneChanged(prevScene, nextScene);
+    VRMQavatars::SceneEventManager::GameSceneChanged(nextScene);
+}
+
+MAKE_HOOK_MATCH(SaberPatch, &GlobalNamespace::Saber::ManualUpdate, void, GlobalNamespace::Saber* self) {
+    SaberPatch(self);
+    const static auto replay = CondDeps::Find<bool>("replay", "IsInReplay");
+    if(replay.has_value() && replay.value()())
+    {
+        if(VRMQavatars::AvatarManager::currentContext != nullptr)
+        {
+            const auto targetManager = VRMQavatars::AvatarManager::currentContext->rootGameObject->GetComponent<VRMQavatars::TargetManager*>();
+            const auto type = self->get_saberType();
+            if(type == GlobalNamespace::SaberType::SaberA)
+            {
+                targetManager->replayLeftSaberPos = self->get_transform()->get_position();
+                targetManager->replayLeftSaberRot = self->get_transform()->get_rotation();
+            }
+            if(type == GlobalNamespace::SaberType::SaberB)
+            {
+                targetManager->replayRightSaberPos = self->get_transform()->get_position();
+                targetManager->replayRightSaberRot = self->get_transform()->get_rotation();
+            }
+        }
+    }
+}
+
+MAKE_HOOK_MATCH(BloomHook, &GlobalNamespace::MainEffectContainerSO::Init, void, GlobalNamespace::MainEffectContainerSO* self, GlobalNamespace::MainEffectSO* mainEffect) {
+    getLogger().info("x1");
+    getLogger().info("%d", mainEffect->get_hasPostProcessEffect());
+    getLogger().info("x2");
+    BloomHook(self, mainEffect);
+    VRMQavatars::MaterialTracker::bloomEnabled = mainEffect->get_hasPostProcessEffect();
+    VRMQavatars::MaterialTracker::UpdateMaterials();
+    getLogger().info("x3");
+}
+
+MOD_EXTERN_FUNC void setup(CModInfo* info) noexcept {
+    *info = modInfo.to_c();
+
+    Paper::Logger::RegisterFileContextId(PaperLogger.tag);
+
+    // same location the old Configuration::getConfigFilePath() produced
+    getGlobalConfig().Init("/sdcard/ModData/com.beatgames.beatsaber/Configs/" MOD_ID ".json");
+}
+
+MOD_EXTERN_FUNC void late_load() noexcept {
+    il2cpp_functions::Init();
+
+    std::filesystem::create_directories(vrm_path);
+    std::filesystem::create_directories(avaconfig_path);
+
+    custom_types::Register::AutoRegister();
+
+    BSML::Init();
+    BSML::Register::RegisterMainMenu<FlowCoordinators::AvatarsFlowCoordinator*>("Avatars", "VRM Custom Avatars");
+
+    INSTALL_HOOK(PaperLogger, MainMenuUIHook);
+    INSTALL_HOOK(PaperLogger, MainCameraHook);
+    INSTALL_HOOK(PaperLogger, SceneManager_Internal_ActiveSceneChanged);
+    INSTALL_HOOK(PaperLogger, SaberPatch);
+    INSTALL_HOOK(PaperLogger, BloomHook);
+}
