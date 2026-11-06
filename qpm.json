@@ -92,7 +92,7 @@
     },
     {
       "id": "fmt",
-      "versionRange": "^10.0.0",
+      "versionRange": "^11.0.2",
       "additionalData": {}
     },
     {
